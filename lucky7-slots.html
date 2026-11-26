@@ -116,84 +116,48 @@
     display:grid;grid-template-columns:repeat(3,1fr);
     gap:var(--cell-gap);
   }
+  /* 每一列就是一张 canvas：转动由逐帧绘制完成，不依赖 DOM 合成，
+     微信 / QQ 内置浏览器里也能稳定滚动 */
   .reel{
     position:relative;
-    height:0;
-    padding-bottom:calc(300% + 2 * var(--cell-gap));
     overflow:hidden;
     border-radius:16px;
+    background:linear-gradient(180deg,#1a1029,#0d0714);
   }
-  /* 一段真正的“长卷轴”，转动时整条向上滚，纯 transform 不重绘内容 */
-  .strip{
-    position:absolute;top:0;left:0;right:0;
-    display:grid;gap:var(--cell-gap);
-    will-change:transform;
-    backface-visibility:hidden;
+  .reel canvas{
+    position:absolute;top:0;left:0;display:block;
+    width:100%;height:auto;
   }
 
-  .cell{
-    position:relative;
-    aspect-ratio:1/1;
-    display:grid;place-items:center;
-    border-radius:16px;
-    overflow:hidden;
-    background:
-      radial-gradient(120% 90% at 50% 0%, rgba(255,255,255,.11), transparent 56%),
-      linear-gradient(180deg,#261637,#150c23 78%);
-    box-shadow:
-      inset 0 0 0 1px rgba(255,255,255,.07),
-      inset 0 -12px 22px rgba(0,0,0,.6),
-      0 5px 12px rgba(0,0,0,.45);
-    transition:box-shadow .18s ease, transform .18s ease;
+  /* 中奖高亮层（静态 DOM，只在结果出来后显示） */
+  .hit-layer{
+    position:absolute;left:13px;top:13px;right:13px;bottom:13px;
+    z-index:5;pointer-events:none;
   }
-  .cell::before{
-    content:"";position:absolute;left:8%;right:8%;top:5px;height:1px;
-    background:linear-gradient(90deg, transparent, rgba(255,255,255,.22), transparent);
+  .hit{
+    position:absolute;border-radius:16px;opacity:0;
+    transition:opacity .18s ease;
   }
-  .cell::after{
-    content:"";position:absolute;inset:-30%;
-    background:linear-gradient(105deg, transparent 42%, rgba(255,255,255,.22) 50%, transparent 58%);
-    transform:translateX(-130%);pointer-events:none;
-  }
-  .cell.hit{
+  .hit.on{
+    opacity:1;
     box-shadow:
       inset 0 0 0 2px rgba(255,214,120,.95),
       inset 0 0 26px rgba(255,176,32,.45),
       0 0 26px rgba(255,170,30,.55);
-    animation:hitPulse 1.1s ease-in-out infinite;
-    z-index:3;
+    animation:hitGlow 1.1s ease-in-out infinite;
   }
-  .cell.hit::after{animation:sheen 1.2s ease-out}
-  @keyframes hitPulse{
-    0%,100%{transform:scale(1)}
-    45%{transform:scale(1.045)}
+  .hit.on.pv{
+    box-shadow:inset 0 0 0 2px rgba(120,200,255,.9), 0 0 22px rgba(90,170,255,.5);
+    animation:none;
   }
-  @keyframes sheen{0%{transform:translateX(-130%)}100%{transform:translateX(130%)}}
-  .cell.preview{
-    box-shadow:inset 0 0 0 2px rgba(120,200,255,.85), 0 0 22px rgba(90,170,255,.45);
-  }
+  @keyframes hitGlow{0%,100%{opacity:.82}50%{opacity:1}}
 
-  .sym{
-    position:relative;z-index:1;
-    font-size:clamp(30px, 9.2vw, 52px);
-    line-height:1;
-    filter:drop-shadow(0 3px 6px rgba(0,0,0,.55));
-    transition:transform .18s ease;
-    user-select:none;
-  }
-  .cell.hit .sym{transform:scale(1.1)}
   .s-seven{
     font-family:Georgia,"Times New Roman",serif;
     font-weight:900;
     background:linear-gradient(180deg,#fff9d9 0%,#ffd34d 42%,#ff9b00 72%,#e2461b 100%);
     -webkit-background-clip:text;background-clip:text;color:transparent;
   }
-  .sym.s-seven{
-    font-size:clamp(38px, 11.5vw, 64px);
-    filter:drop-shadow(0 3px 0 rgba(110,30,0,.55)) drop-shadow(0 0 16px rgba(255,140,0,.55));
-  }
-  .sym.s-diamond{filter:drop-shadow(0 0 12px rgba(120,220,255,.65))}
-  .sym.s-bell{filter:drop-shadow(0 0 10px rgba(255,215,90,.55))}
 
   .payline-layer{
     position:absolute;left:13px;top:13px;right:13px;bottom:13px;
@@ -486,8 +450,7 @@
   }
   /* 尊重「减弱动态效果」：只关装饰动画，卷轴转动必须保留（这是玩法反馈） */
   @media (prefers-reduced-motion: reduce){
-    .fs-badge,.bigwin-inner,.coin,.spin.busy,.chip.jack.bump,.cell.hit{animation:none !important}
-    .cell.hit{transform:none !important}
+    .fs-badge,.bigwin-inner,.coin,.spin.busy,.chip.jack.bump,.hit.on{animation:none !important}
   }
 </style>
 </head>
@@ -512,6 +475,7 @@
   <section class="cabinet">
     <div class="reel-wrap" id="reelWrap">
       <div class="reels" id="reels"></div>
+      <div class="hit-layer" id="hitLayer"></div>
       <div class="payline-layer" id="lineLayer" aria-hidden="true"></div>
       <div class="glass"></div>
       <div class="win-float" id="winFloat"></div>
@@ -626,6 +590,7 @@
   const $ = id => document.getElementById(id);
   const reelsEl   = $('reels');
   const lineLayer = $('lineLayer');
+  const hitLayer  = $('hitLayer');
   const cabinetEl = document.querySelector('.cabinet');
   const lineDots  = $('lineDots');
   const paytable  = $('paytable');
@@ -767,61 +732,154 @@
   };
   Snd.muted = state.muted;
 
-  const cellEls = [[], [], []];
   const reelEls = [];
-  const stripEls = [];
+  const reelCv = [];
+  const hitGrid = [[], [], []];
   const REEL_STEPS = 12;   // 转动时滚过的符号数量
   const REEL_GAP = 10;     // 与 CSS 的 --cell-gap 保持一致
   const currentSymbols = [[], [], []];
+  let cellSize = 120;
 
   /* =========================================================
-     6. 构建卷轴
+     6. 卷轴（canvas 绘制）
      ========================================================= */
-  function makeCell(sym) {
-    const cell = document.createElement('div');
-    cell.className = 'cell';
-    const span = document.createElement('span');
-    span.className = 'sym s-' + sym.id;
-    span.textContent = sym.icon;
-    cell.appendChild(span);
-    return cell;
+  const tileCache = {};
+
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
   }
 
-  /* 重建某一列的卷轴内容，并把 transform 复位到 0 */
-  function renderStrip(c, symbols) {
-    const strip = stripEls[c];
-    strip.style.transition = 'none';
-    strip.style.transform = 'translate3d(0,0,0)';
-    strip.textContent = '';
-    return symbols.map(sym => {
-      const cell = makeCell(sym);
-      strip.appendChild(cell);
-      return cell;
+  /* 画一个“格子”：深色圆角块 + 符号，预先烘焙成图片缓存 */
+  function drawTile(ctx, sym, s) {
+    const r = s * 0.135;
+    roundRectPath(ctx, 0.5, 0.5, s - 1, s - 1, r);
+    const bg = ctx.createLinearGradient(0, 0, 0, s);
+    bg.addColorStop(0, '#2b1a3f');
+    bg.addColorStop(1, '#150c23');
+    ctx.fillStyle = bg;
+    ctx.fill();
+
+    const top = ctx.createLinearGradient(0, 0, 0, s * 0.55);
+    top.addColorStop(0, 'rgba(255,255,255,.13)');
+    top.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = top;
+    ctx.fill();
+
+    const bottom = ctx.createLinearGradient(0, s * 0.45, 0, s);
+    bottom.addColorStop(0, 'rgba(0,0,0,0)');
+    bottom.addColorStop(1, 'rgba(0,0,0,.55)');
+    ctx.fillStyle = bottom;
+    ctx.fill();
+
+    roundRectPath(ctx, 0.6, 0.6, s - 1.2, s - 1.2, r);
+    ctx.strokeStyle = 'rgba(255,255,255,.07)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,.6)';
+    ctx.shadowBlur = s * 0.05;
+    ctx.shadowOffsetY = s * 0.02;
+    if (sym.id === 'seven') {
+      ctx.font = '900 ' + (s * 0.62) + 'px Georgia, "Times New Roman", serif';
+      const g = ctx.createLinearGradient(0, s * 0.28, 0, s * 0.72);
+      g.addColorStop(0, '#fff9d9');
+      g.addColorStop(0.45, '#ffd34d');
+      g.addColorStop(0.78, '#ff9b00');
+      g.addColorStop(1, '#e2461b');
+      ctx.fillStyle = g;
+    } else {
+      ctx.font = (s * 0.5) + 'px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+      ctx.fillStyle = '#fff';
+    }
+    ctx.fillText(sym.icon, s / 2, s / 2 + s * 0.02);
+    ctx.restore();
+  }
+
+  function buildTileCache() {
+    const s = 220;
+    SYMBOLS.forEach(sym => {
+      const cv = document.createElement('canvas');
+      cv.width = s;
+      cv.height = s;
+      drawTile(cv.getContext('2d'), sym, s);
+      tileCache[sym.id] = cv;
+    });
+  }
+
+  /* 把一列符号画进该列的 canvas，并复位到顶部 */
+  function drawReel(c, symbols) {
+    const cv = reelCv[c];
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+    const total = symbols.length * cellSize + (symbols.length - 1) * REEL_GAP;
+    cv.width = Math.max(1, Math.round(cellSize * dpr));
+    cv.height = Math.max(1, Math.round(total * dpr));
+    cv.style.transition = 'none';
+    cv.style.transform = 'translate3d(0,0,0)';
+
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cellSize, total);
+    symbols.forEach((sym, i) => {
+      ctx.drawImage(tileCache[sym.id], 0, i * (cellSize + REEL_GAP), cellSize, cellSize);
     });
   }
 
   function buildReels() {
+    buildTileCache();
     for (let c = 0; c < 3; c++) {
       const col = document.createElement('div');
       col.className = 'reel';
       col.dataset.col = String(c);
-      const strip = document.createElement('div');
-      strip.className = 'strip';
-      col.appendChild(strip);
+      const cv = document.createElement('canvas');
+      col.appendChild(cv);
       reelsEl.appendChild(col);
       reelEls[c] = col;
-      stripEls[c] = strip;
+      reelCv[c] = cv;
     }
   }
 
-  /* 静止状态：只放 3 个符号 */
-  function showIdle() {
+  function buildHitGrid() {
+    hitLayer.textContent = '';
     for (let c = 0; c < 3; c++) {
+      hitGrid[c] = [];
+      for (let r = 0; r < 3; r++) {
+        const d = document.createElement('div');
+        d.className = 'hit';
+        d.style.left = (c * (cellSize + REEL_GAP)) + 'px';
+        d.style.top = (r * (cellSize + REEL_GAP)) + 'px';
+        d.style.width = cellSize + 'px';
+        d.style.height = cellSize + 'px';
+        hitLayer.appendChild(d);
+        hitGrid[c][r] = d;
+      }
+    }
+  }
+
+  /* 按容器宽度算格子尺寸，并把静止画面画出来 */
+  function layoutReels() {
+    const W = reelsEl.clientWidth;
+    if (!W) return;
+    cellSize = (W - REEL_GAP * 2) / 3;
+    const H = cellSize * 3 + REEL_GAP * 2;
+    reelsEl.style.height = H + 'px';
+    for (let c = 0; c < 3; c++) {
+      reelEls[c].style.height = H + 'px';
       if (!currentSymbols[c].length) {
         currentSymbols[c] = [weightedSymbol(), weightedSymbol(), weightedSymbol()];
       }
-      cellEls[c] = renderStrip(c, currentSymbols[c]);
+      drawReel(c, currentSymbols[c]);
     }
+    buildHitGrid();
+    lineLayer.innerHTML = '';
   }
 
   /* =========================================================
@@ -868,24 +926,25 @@
     lineLayer.classList.remove('preview');
     winFloat.classList.remove('show');
     for (let c = 0; c < 3; c++) {
-      for (let r = 0; r < 3; r++) cellEls[c][r].classList.remove('hit', 'preview');
+      for (let r = 0; r < 3; r++) hitGrid[c][r].classList.remove('on', 'pv');
     }
+  }
+
+  /* 格子中心点（相对中奖高亮层 / 支付线层的坐标） */
+  function cellCenter(c, r) {
+    return {
+      x: c * (cellSize + REEL_GAP) + cellSize / 2,
+      y: r * (cellSize + REEL_GAP) + cellSize / 2
+    };
   }
 
   function drawLines(wins, preview) {
     lineLayer.innerHTML = '';
     lineLayer.classList.toggle('preview', !!preview);
-    const base = lineLayer.getBoundingClientRect();
 
     wins.forEach(w => {
       const color = LINE_COLORS[w.line];
-      const pts = w.cells.map(([c, r]) => {
-        const b = cellEls[c][r].getBoundingClientRect();
-        return {
-          x: b.left - base.left + b.width / 2,
-          y: b.top - base.top + b.height / 2
-        };
-      });
+      const pts = w.cells.map(([c, r]) => cellCenter(c, r));
 
       for (let i = 0; i < pts.length - 1; i++) {
         const a = pts[i];
@@ -921,7 +980,7 @@
   function previewLine(i) {
     clearFx();
     const line = LINES[i];
-    line.cells.forEach(([c, r]) => cellEls[c][r].classList.add('preview'));
+    line.cells.forEach(([c, r]) => hitGrid[c][r].classList.add('on', 'pv'));
     drawLines([{ line: i, cells: line.cells }], true);
   }
 
@@ -1052,27 +1111,25 @@
   /* =========================================================
      11. 转一次
      ========================================================= */
-  /* 真正的卷轴滚动：把 12 个随机符号 + 3 个结果 + 2 个余量铺成一条长带，
-     用 transform 位移来“滚”，转动过程中内容完全不变，手机上也只需合成、不重绘。
-     三列用不同时长，依次停下。 */
+  /* 卷轴转动：每列画成一张长 canvas，用 transform 整体上移。
+     canvas 在多数 webview 里是一张纹理，位移不触发重排/重绘，
+     绕开了 QQ / 微信内置浏览器对“圆角裁剪 + 子元素位移”的合成 bug。 */
   function animateSpin(grid, speed) {
     const durations = [700, 860, 1020].map(d => Math.round(d * speed));
 
     for (let c = 0; c < 3; c++) {
-      const cellW = reelEls[c].clientWidth || 110;
       const symbols = [];
       for (let i = 0; i < REEL_STEPS; i++) symbols.push(weightedSymbol());
       symbols.push(grid[c][0], grid[c][1], grid[c][2]);
       symbols.push(weightedSymbol(), weightedSymbol());
 
-      const cells = renderStrip(c, symbols);
-      cellEls[c] = cells.slice(REEL_STEPS, REEL_STEPS + 3);
+      drawReel(c, symbols);
 
-      const strip = stripEls[c];
-      const dist = REEL_STEPS * (cellW + REEL_GAP);
-      void strip.offsetHeight;   /* 让“复位到 0”先落地，再开始过渡 */
-      strip.style.transition = 'transform ' + durations[c] + 'ms cubic-bezier(.2,.86,.3,1.02)';
-      strip.style.transform = 'translate3d(0,' + (-dist) + 'px,0)';
+      const cv = reelCv[c];
+      const dist = REEL_STEPS * (cellSize + REEL_GAP);
+      void cv.offsetHeight;   /* 让“复位到 0”先落地，再开始过渡 */
+      cv.style.transition = 'transform ' + durations[c] + 'ms cubic-bezier(.2,.86,.3,1.02)';
+      cv.style.transform = 'translate3d(0,' + (-dist) + 'px,0)';
     }
 
     for (let c = 0; c < 3; c++) {
@@ -1148,12 +1205,8 @@
     /* 中奖展示 */
     if (res.wins.length) {
       drawLines(res.wins);
-      res.wins.forEach((w, i) => {
-        w.cells.forEach(([c, r]) => {
-          const cell = cellEls[c][r];
-          cell.classList.add('hit');
-          cell.style.animationDelay = (i * 90) + 'ms';
-        });
+      res.wins.forEach(w => {
+        w.cells.forEach(([c, r]) => hitGrid[c][r].classList.add('on'));
       });
     }
 
@@ -1402,7 +1455,7 @@
     lineLayer.innerHTML = '';
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      if (!state.busy) showIdle();
+      if (!state.busy) layoutReels();
     }, 220);
   });
 
@@ -1412,10 +1465,14 @@
   buildReels();
   buildPaytable();
   buildLineDots();
-  showIdle();
+  layoutReels();
   syncHud();
   syncControls();
   persist();
+
+  window.addEventListener('load', () => {
+    if (!state.busy) layoutReels();
+  });
 
   /* 首次打开时给一点指引 */
   setTimeout(() => {
