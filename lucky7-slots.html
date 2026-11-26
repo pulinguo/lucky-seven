@@ -116,30 +116,19 @@
     display:grid;grid-template-columns:repeat(3,1fr);
     gap:var(--cell-gap);
   }
-  .reel{position:relative;overflow:hidden;border-radius:16px}
+  .reel{
+    position:relative;
+    height:0;
+    padding-bottom:calc(300% + 2 * var(--cell-gap));
+    overflow:hidden;
+    border-radius:16px;
+  }
+  /* 一段真正的“长卷轴”，转动时整条向上滚，纯 transform 不重绘内容 */
   .strip{
+    position:absolute;top:0;left:0;right:0;
     display:grid;gap:var(--cell-gap);
     will-change:transform;
-  }
-  .reel.spinning .strip{
-    animation:jitter .1s linear infinite;
-  }
-  /* 转动期间关掉符号投影，避免手机上每帧重绘滤镜导致掉帧 */
-  .reel.spinning .sym{filter:none !important}
-  .reel.spinning::after{
-    content:"";position:absolute;inset:0;pointer-events:none;border-radius:16px;
-    background:linear-gradient(180deg, rgba(255,255,255,.10), transparent 30%, transparent 70%, rgba(255,255,255,.10));
-  }
-  @keyframes jitter{
-    0%{transform:translateY(-8px)}
-    50%{transform:translateY(8px)}
-    100%{transform:translateY(-8px)}
-  }
-  .strip.settle{animation:settle .3s cubic-bezier(.16,1.5,.4,1)}
-  @keyframes settle{
-    0%{transform:translateY(-16px)}
-    62%{transform:translateY(3px)}
-    100%{transform:translateY(0)}
+    backface-visibility:hidden;
   }
 
   .cell{
@@ -779,12 +768,38 @@
   Snd.muted = state.muted;
 
   const cellEls = [[], [], []];
-  const symEls  = [[], [], []];
   const reelEls = [];
+  const stripEls = [];
+  const REEL_STEPS = 12;   // 转动时滚过的符号数量
+  const REEL_GAP = 10;     // 与 CSS 的 --cell-gap 保持一致
+  const currentSymbols = [[], [], []];
 
   /* =========================================================
      6. 构建卷轴
      ========================================================= */
+  function makeCell(sym) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const span = document.createElement('span');
+    span.className = 'sym s-' + sym.id;
+    span.textContent = sym.icon;
+    cell.appendChild(span);
+    return cell;
+  }
+
+  /* 重建某一列的卷轴内容，并把 transform 复位到 0 */
+  function renderStrip(c, symbols) {
+    const strip = stripEls[c];
+    strip.style.transition = 'none';
+    strip.style.transform = 'translate3d(0,0,0)';
+    strip.textContent = '';
+    return symbols.map(sym => {
+      const cell = makeCell(sym);
+      strip.appendChild(cell);
+      return cell;
+    });
+  }
+
   function buildReels() {
     for (let c = 0; c < 3; c++) {
       const col = document.createElement('div');
@@ -792,34 +807,20 @@
       col.dataset.col = String(c);
       const strip = document.createElement('div');
       strip.className = 'strip';
-
-      for (let r = 0; r < 3; r++) {
-        const cell = document.createElement('div');
-        cell.className = 'cell';
-        const sym = document.createElement('span');
-        sym.className = 'sym';
-        cell.appendChild(sym);
-        strip.appendChild(cell);
-        cellEls[c][r] = cell;
-        symEls[c][r] = sym;
-      }
       col.appendChild(strip);
       reelsEl.appendChild(col);
       reelEls[c] = col;
+      stripEls[c] = strip;
     }
   }
 
-  function paint(c, r, sym) {
-    const el = symEls[c][r];
-    if (el.dataset.id === sym.id) return;
-    el.dataset.id = sym.id;
-    el.textContent = sym.icon;
-    el.className = 'sym s-' + sym.id;
-  }
-
-  function paintGrid(grid) {
+  /* 静止状态：只放 3 个符号 */
+  function showIdle() {
     for (let c = 0; c < 3; c++) {
-      for (let r = 0; r < 3; r++) paint(c, r, grid[c][r]);
+      if (!currentSymbols[c].length) {
+        currentSymbols[c] = [weightedSymbol(), weightedSymbol(), weightedSymbol()];
+      }
+      cellEls[c] = renderStrip(c, currentSymbols[c]);
     }
   }
 
@@ -1051,72 +1052,34 @@
   /* =========================================================
      11. 转一次
      ========================================================= */
-  /* 用 requestAnimationFrame 驱动转动：帧率跟着屏幕走，
-     不会因为定时器被节流而直接跳到结果；同时保证至少转够 1 秒左右 */
+  /* 真正的卷轴滚动：把 12 个随机符号 + 3 个结果 + 2 个余量铺成一条长带，
+     用 transform 位移来“滚”，转动过程中内容完全不变，手机上也只需合成、不重绘。
+     三列用不同时长，依次停下。 */
   function animateSpin(grid, speed) {
-    return new Promise(resolve => {
-      const t0 = performance.now();
-      const firstStop = 520 * speed;
-      const stepStop = 180 * speed;
-      const stopAt = [firstStop, firstStop + stepStop, firstStop + stepStop * 2];
-      const endAt = stopAt[2] + 90;
-      const stopped = [false, false, false];
-      let lastSwap = -999;
-      let finished = false;
+    const durations = [700, 860, 1020].map(d => Math.round(d * speed));
 
-      for (let c = 0; c < 3; c++) reelEls[c].classList.add('spinning');
+    for (let c = 0; c < 3; c++) {
+      const cellW = reelEls[c].clientWidth || 110;
+      const symbols = [];
+      for (let i = 0; i < REEL_STEPS; i++) symbols.push(weightedSymbol());
+      symbols.push(grid[c][0], grid[c][1], grid[c][2]);
+      symbols.push(weightedSymbol(), weightedSymbol());
 
-      const finish = () => {
-        if (finished) return;
-        finished = true;
-        for (let c = 0; c < 3; c++) {
-          if (!stopped[c]) { stopped[c] = true; stopReel(c, grid); }
-        }
-        resolve();
-      };
+      const cells = renderStrip(c, symbols);
+      cellEls[c] = cells.slice(REEL_STEPS, REEL_STEPS + 3);
 
-      /* 兜底：切后台 / 极端节流时也要收尾 */
-      const safety = setTimeout(finish, endAt + 1000);
+      const strip = stripEls[c];
+      const dist = REEL_STEPS * (cellW + REEL_GAP);
+      void strip.offsetHeight;   /* 让“复位到 0”先落地，再开始过渡 */
+      strip.style.transition = 'transform ' + durations[c] + 'ms cubic-bezier(.2,.86,.3,1.02)';
+      strip.style.transform = 'translate3d(0,' + (-dist) + 'px,0)';
+    }
 
-      function frame(now) {
-        if (finished) return;
-        const t = now - t0;
+    for (let c = 0; c < 3; c++) {
+      setTimeout(() => Snd.thud(c), durations[c]);
+    }
 
-        if (t - lastSwap >= 62) {
-          lastSwap = t;
-          for (let c = 0; c < 3; c++) {
-            if (stopped[c]) continue;
-            for (let r = 0; r < 3; r++) paint(c, r, weightedSymbol());
-          }
-        }
-
-        for (let c = 0; c < 3; c++) {
-          if (!stopped[c] && t >= stopAt[c]) {
-            stopped[c] = true;
-            stopReel(c, grid);
-            Snd.thud(c);
-          }
-        }
-
-        if (t >= endAt) {
-          clearTimeout(safety);
-          finish();
-          return;
-        }
-        requestAnimationFrame(frame);
-      }
-
-      requestAnimationFrame(frame);
-    });
-  }
-
-  function stopReel(c, grid) {
-    reelEls[c].classList.remove('spinning');
-    const strip = reelEls[c].firstElementChild;
-    for (let r = 0; r < 3; r++) paint(c, r, grid[c][r]);
-    strip.classList.remove('settle');
-    void strip.offsetWidth;
-    strip.classList.add('settle');
+    return sleep(durations[2] + 90);
   }
 
   async function runOneSpin() {
@@ -1146,13 +1109,14 @@
     for (let c = 0; c < 3; c++) {
       grid[c] = [];
       for (let r = 0; r < 3; r++) grid[c][r] = weightedSymbol();
+      currentSymbols[c] = grid[c].slice();
     }
 
     const speed = state.turbo ? 0.55 : 1;
     Snd.startTicks();
     await animateSpin(grid, speed);
     Snd.stopTicks();
-    await sleep(140);
+    await sleep(120);
 
     const mult = isFree ? FREE_MULT : 1;
     const res = evaluate(grid, lineBet, mult);
@@ -1403,11 +1367,6 @@
     });
   }
 
-  function randomGrid() {
-    return Array.from({ length: 3 }, () =>
-      Array.from({ length: 3 }, weightedSymbol));
-  }
-
   /* =========================================================
      14. 事件绑定
      ========================================================= */
@@ -1438,8 +1397,13 @@
     }
   });
 
+  let resizeTimer = null;
   window.addEventListener('resize', () => {
     lineLayer.innerHTML = '';
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!state.busy) showIdle();
+    }, 220);
   });
 
   /* =========================================================
@@ -1448,7 +1412,7 @@
   buildReels();
   buildPaytable();
   buildLineDots();
-  paintGrid(randomGrid());
+  showIdle();
   syncHud();
   syncControls();
   persist();
