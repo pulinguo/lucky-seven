@@ -119,16 +119,21 @@
   .reel{position:relative;overflow:hidden;border-radius:16px}
   .strip{
     display:grid;gap:var(--cell-gap);
-    will-change:transform,filter;
+    will-change:transform;
   }
   .reel.spinning .strip{
-    animation:jitter .11s linear infinite;
-    filter:blur(1.6px) brightness(1.12) saturate(1.1);
+    animation:jitter .1s linear infinite;
+  }
+  /* 转动期间关掉符号投影，避免手机上每帧重绘滤镜导致掉帧 */
+  .reel.spinning .sym{filter:none !important}
+  .reel.spinning::after{
+    content:"";position:absolute;inset:0;pointer-events:none;border-radius:16px;
+    background:linear-gradient(180deg, rgba(255,255,255,.10), transparent 30%, transparent 70%, rgba(255,255,255,.10));
   }
   @keyframes jitter{
-    0%{transform:translateY(-9px)}
-    50%{transform:translateY(9px)}
-    100%{transform:translateY(-9px)}
+    0%{transform:translateY(-8px)}
+    50%{transform:translateY(8px)}
+    100%{transform:translateY(-8px)}
   }
   .strip.settle{animation:settle .3s cubic-bezier(.16,1.5,.4,1)}
   @keyframes settle{
@@ -490,8 +495,10 @@
     .hint{display:none}
     .paytable{justify-content:flex-start;gap:12px}
   }
+  /* 尊重「减弱动态效果」：只关装饰动画，卷轴转动必须保留（这是玩法反馈） */
   @media (prefers-reduced-motion: reduce){
-    *{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}
+    .fs-badge,.bigwin-inner,.coin,.spin.busy,.chip.jack.bump,.cell.hit{animation:none !important}
+    .cell.hit{transform:none !important}
   }
 </style>
 </head>
@@ -1044,11 +1051,63 @@
   /* =========================================================
      11. 转一次
      ========================================================= */
-  function startReel(c) {
-    reelEls[c].classList.add('spinning');
-    return setInterval(() => {
-      for (let r = 0; r < 3; r++) paint(c, r, weightedSymbol());
-    }, 55);
+  /* 用 requestAnimationFrame 驱动转动：帧率跟着屏幕走，
+     不会因为定时器被节流而直接跳到结果；同时保证至少转够 1 秒左右 */
+  function animateSpin(grid, speed) {
+    return new Promise(resolve => {
+      const t0 = performance.now();
+      const firstStop = 520 * speed;
+      const stepStop = 180 * speed;
+      const stopAt = [firstStop, firstStop + stepStop, firstStop + stepStop * 2];
+      const endAt = stopAt[2] + 90;
+      const stopped = [false, false, false];
+      let lastSwap = -999;
+      let finished = false;
+
+      for (let c = 0; c < 3; c++) reelEls[c].classList.add('spinning');
+
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        for (let c = 0; c < 3; c++) {
+          if (!stopped[c]) { stopped[c] = true; stopReel(c, grid); }
+        }
+        resolve();
+      };
+
+      /* 兜底：切后台 / 极端节流时也要收尾 */
+      const safety = setTimeout(finish, endAt + 1000);
+
+      function frame(now) {
+        if (finished) return;
+        const t = now - t0;
+
+        if (t - lastSwap >= 62) {
+          lastSwap = t;
+          for (let c = 0; c < 3; c++) {
+            if (stopped[c]) continue;
+            for (let r = 0; r < 3; r++) paint(c, r, weightedSymbol());
+          }
+        }
+
+        for (let c = 0; c < 3; c++) {
+          if (!stopped[c] && t >= stopAt[c]) {
+            stopped[c] = true;
+            stopReel(c, grid);
+            Snd.thud(c);
+          }
+        }
+
+        if (t >= endAt) {
+          clearTimeout(safety);
+          finish();
+          return;
+        }
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    });
   }
 
   function stopReel(c, grid) {
@@ -1090,19 +1149,10 @@
     }
 
     const speed = state.turbo ? 0.55 : 1;
-    const timers = [];
-    for (let c = 0; c < 3; c++) timers[c] = startReel(c);
     Snd.startTicks();
-
-    await sleep(470 * speed);
-    for (let c = 0; c < 3; c++) {
-      clearInterval(timers[c]);
-      stopReel(c, grid);
-      Snd.thud(c);
-      await sleep(170 * speed);
-    }
+    await animateSpin(grid, speed);
     Snd.stopTicks();
-    await sleep(150);
+    await sleep(140);
 
     const mult = isFree ? FREE_MULT : 1;
     const res = evaluate(grid, lineBet, mult);
